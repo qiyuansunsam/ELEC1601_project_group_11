@@ -1,0 +1,261 @@
+```
+// Bluetooth
+#include <SoftwareSerial.h>   //Software Serial Port
+#include <Servo.h>
+
+#define RxD 7
+#define TxD 6
+#define ConnStatus A1
+
+int shieldPairNumber = 11; // EDIT THE LINES TO MATCH YOUR SHIELD NUMBER AND CONNECTION PIN OPTION
+boolean ConnStatusSupported = true;   // Set to "true" when digital connection status is available on Arduino pin, CAUTION: If ConnStatusSupported = true you MUST NOT use pin A1 otherwise "random" reboots will occur, CAUTION: If ConnStatusSupported = true you MUST set the PIO[1] switch to A1 (not NC)
+String slaveNameCmd = "\r\n+STNA=Slave";   // This is concatenated with shieldPairNumber later
+
+SoftwareSerial blueToothSerial(RxD,TxD);
+
+// Movement
+Servo servoLeft;
+Servo servoRight;
+
+boolean manualControl = true;
+boolean lastSeenLeft = true;
+
+int instructs[100];
+int instructCount = -1;
+
+void setup() {
+    Serial.begin(9600);
+    initBlueToothConnection();
+
+    pinMode(10, INPUT); // Left IR LED Receiver
+    pinMode(9, OUTPUT); // sender   
+
+    pinMode(3, INPUT); // Right IR LED Receiver 
+    pinMode(2, OUTPUT); //sender   
+}
+
+void loop() {
+    joystickControl();
+}
+
+void joystickControl() {
+    char recvChar;
+    String joystick;
+    boolean stopped = true;
+
+    while (true) {
+        if(blueToothSerial.available()) {   // Check if there's any data sent from the remote Bluetooth shield
+            recvChar = blueToothSerial.read();
+            Serial.print(recvChar); // this is needed
+
+            if (manualControl) {
+              if (recvChar == '!') {
+                manualControl = false;
+                servoLeft.attach(13);  // Attach left signal to pin 13
+                servoRight.attach(12); // Attach right signal to pin 12
+                continue;
+              }
+              if (recvChar != '\n') { 
+                  joystick += recvChar; // end of data hasn't been reached, process incoming data
+              } else {
+                  if (joystick == "!") {
+                    return; // transfer to automatic
+                  }
+                  // Has reached end of data, process...
+  
+                  if (validInput(joystick)) { // Check if data is of form x,y
+                      String x;
+                      String y;
+                      boolean searchingX = true;
+                  
+                      // Seperate data into x and y values
+                      for (char c : joystick) {
+                          if (c == ',') {
+                              searchingX = false;
+                              continue;
+                          }
+  
+                          if (searchingX) {
+                              x += c;
+                          } else {
+                              y += c;
+                          }
+                      }
+  
+                      if (x != "" && y != "") {                     // x and y found
+                          // Process data here
+                          int xInt = x.toInt();
+                          int yInt = y.toInt();
+                          
+                          if (xInt == 0 && yInt == 0) { // don't move robot if stopped
+                              if (!stopped) { // has just stopped, disconnect wheels
+                                  stopped = true;
+                                  servoLeft.detach();
+                                  servoRight.detach();
+                              }
+                          } else {
+                              if (stopped) { // start wheels again if was stopped
+                                  servoLeft.attach(13);
+                                  servoRight.attach(12);
+                                  stopped = false;
+                              }
+                              moveWheels(xInt, yInt);
+                          }
+                      }
+                  }
+                  joystick = ""; //reset value
+              }
+              
+           } else {
+              if (recvChar == '!') {
+                manualControl = true;
+                servoLeft.detach();
+                servoRight.detach();
+                stopped = true;
+                continue;
+              }
+              followLine(100);
+           }
+        }
+
+        // Not relevant, but don't change
+        if (Serial.available()) {       // Check if there's any data sent from the local serial terminal. You can add the other applications here.
+            recvChar  = Serial.read();
+            Serial.print(recvChar);
+            blueToothSerial.print(recvChar);
+        }
+    }
+}
+
+void followLine(int velocity) {
+    // Check for line
+    int irLeft = irDetect(9, 10, 38000);       
+    int irRight = irDetect(2, 3, 38000);
+    Serial.println("LEFT: " + String(irLeft) + " RIGHT: " + String(irRight)); // Display 1/0; 1 for white and 0 for black
+
+    // Move accordingly
+    if ((irLeft == 1) && (irRight == 1)) {      // If both sides detect black, line must be in middle
+        maneuver(velocity, velocity);                   // Forward 20 milliseconds
+    } else if (irLeft == 1) {                   // If only left side detects black, move left to correct
+        maneuver(-velocity, velocity);                    // Right for 20 ms
+    } else if(irRight == 1) {                   // If only right side detects black, move right to correct
+        maneuver(velocity, -velocity);              // Left for 20 ms
+    } else {                                    // Both sides detect black, reached end of course, stop automation
+        //break;
+    }
+}
+/*
+void reverseTrack() {
+    for (int i = intructions; i >= 0; i-= 2) {
+        int movement = directions[i];
+
+        // Move accordingly
+        if (movement == 1) {      // If both sides detect white, line must be in middle
+            maneuver(-200, -200, 20);                   // Forward 20 milliseconds
+        } else if (movement == 2) {                   // If only left side detects white, right must be on line, move right to correct
+            maneuver(-200, 200, 20);                    // Right for 20 ms
+        } else if(movement == 4) {                   // If only right side detects white, left must be on line, move left to correct
+            maneuver(200, -200, 20);                 // Left for 20 ms
+        } else {                                    // Both sides detect black, reached end of course, stop automation
+            break;
+        }
+    }
+}
+*/
+
+void pause() {
+    while (true) {
+        ;
+    }
+}
+
+int irDetect(int irLedPin, int irReceiverPin, long frequency) {
+    tone(irLedPin, frequency, 8);              // IRLED 38 kHz for at least 1 ms
+    delay(1);                                  // Wait 1 ms
+    int ir = digitalRead(irReceiverPin);       // IR receiver -> ir variable; could also use analogRead() ???
+    delay(1);                              // Down time before recheck
+    return ir;                      // Return 1 (black), 0 white
+} 
+
+void moveWheels(int x, int y) {
+  servoLeft.writeMicroseconds(1500 + y + x);
+  servoRight.writeMicroseconds(1500 - y + x);
+}
+
+void maneuver(int speedLeft, int speedRight) {
+    int msTime = 10;
+    // speedLeft, speedRight ranges: Backward  Linear  Stop  Linear   Forward
+    //                               -200      -100......0......100       200
+    servoLeft.writeMicroseconds(1500 + speedLeft);   // Set left servo speed
+    servoRight.writeMicroseconds(1500 - speedRight); // Set right servo speed
+    if(msTime==-1) {                                 // if msTime = -1                                  
+        servoLeft.detach();                            // Stop servo signals
+        servoRight.detach();   
+    }
+    delay(msTime);                                   // Delay for msTime
+}
+
+boolean validInput(String joystick) {
+    // Verify data by comma count
+    int commasFound = 0;
+    for (char c : joystick) {
+        if (c == ',') {
+            if (commasFound >= 1) {
+                return false;
+            }
+            commasFound += 1;
+        }
+    }
+    return true;
+}
+
+void initBlueToothConnection() {
+    blueToothSerial.begin(38400);                    // Set Bluetooth module to default baud rate 38400
+
+    pinMode(RxD, INPUT);
+    pinMode(TxD, OUTPUT);
+    pinMode(ConnStatus, INPUT);
+
+    if(ConnStatusSupported) Serial.println("Checking Slave-Master connection status."); //  Check whether Master and Slave are already connected by polling the ConnStatus pin (A1 on SeeedStudio v1 shield), This prevents running the full connection setup routine if not necessary.
+
+    if(ConnStatusSupported && digitalRead(ConnStatus)==1) {
+        Serial.println("Already connected to Master - remove USB cable if reboot of Master Bluetooth required.");
+    } else {
+        Serial.println("Not connected to Master.");
+
+        setupBlueToothConnection();   // Set up the local (slave) Bluetooth module
+
+        delay(1000);                  // Wait one second and flush the serial buffers
+        Serial.flush();
+        blueToothSerial.flush();
+    }
+}
+
+void setupBlueToothConnection() {
+    Serial.println("Setting up the local (slave) Bluetooth module.");
+
+    slaveNameCmd += shieldPairNumber;
+    slaveNameCmd += "\r\n";
+
+    blueToothSerial.print("\r\n+STWMOD=0\r\n");      // Set the Bluetooth to work in slave mode
+    blueToothSerial.print(slaveNameCmd);             // Set the Bluetooth name using slaveNameCmd
+    blueToothSerial.print("\r\n+STAUTO=0\r\n");      // Auto-connection should be forbidden here
+    blueToothSerial.print("\r\n+STOAUT=1\r\n");      // Permit paired device to connect me
+
+    //  print() sets up a transmit/outgoing buffer for the string which is then transmitted via interrupts one character at a time.
+    //  This allows the program to keep running, with the transmitting happening in the background.
+    //  Serial.flush() does not empty this buffer, instead it pauses the program until all Serial.print()ing is done.
+    //  This is useful if there is critical timing mixed in with Serial.print()s.
+    //  To clear an "incoming" serial buffer, use while(Serial.available()){Serial.read();}
+
+    blueToothSerial.flush();
+    delay(2000);                                     // This delay is required
+
+    blueToothSerial.print("\r\n+INQ=1\r\n");         // Make the slave Bluetooth inquirable
+
+    blueToothSerial.flush();
+    delay(2000);                                     // This delay is required
+
+    Serial.println("The slave bluetooth is inquirable!");
+}
+```
